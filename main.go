@@ -30,7 +30,7 @@ func introspect() map[string]any {
 		"author": "sofyan48", "author_contact": "https://github.com/sofyan48/zoraxy-integrator",
 		"description": "Token-authenticated CI/CD provisioning of managed HTTP proxy rules",
 		"url":         "https://github.com/sofyan48/zoraxy-integrator", "type": 0,
-		"version_major": 0, "version_minor": 1, "version_patch": 0,
+		"version_major": 0, "version_minor": 1, "version_patch": 1,
 		"static_capture_paths":   []map[string]string{{"capture_path": apiPrefix}},
 		"static_capture_ingress": "/capture", "ui_path": "/ui",
 	}
@@ -183,12 +183,14 @@ func (a *application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (a *application) serveCapture(w http.ResponseWriter, r *http.Request) {
 	capture := strings.TrimSuffix(r.Header.Get("X-Zoraxy-Capture"), "/")
 	if capture != strings.TrimSuffix(apiPrefix, "/") {
-		http.NotFound(w, r)
+		log.Printf("capture rejected: unexpected capture prefix %q", capture)
+		respond(w, http.StatusNotFound, map[string]string{"error": "unexpected Zoraxy capture prefix"})
 		return
 	}
 	original, err := url.ParseRequestURI(r.Header.Get("X-Zoraxy-Uri"))
 	if err != nil || !strings.HasPrefix(original.Path, apiPrefix) {
-		http.NotFound(w, r)
+		log.Print("capture rejected: missing or unexpected original URI")
+		respond(w, http.StatusNotFound, map[string]string{"error": "missing or unexpected X-Zoraxy-Uri"})
 		return
 	}
 	r.URL.Path = original.Path
@@ -276,9 +278,13 @@ func run() error {
 	mux.HandleFunc("/capture/", app.serveCapture)
 	mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = io.WriteString(w, "CI/CD Integrator 0.1.0\nAPI: PUT /_zoraxy-integrator/v1/proxies\nConfiguration: integrator.json or environment variables. See README.\n")
+		_, _ = io.WriteString(w, "CI/CD Integrator 0.1.1\nAPI: PUT /_zoraxy-integrator/v1/proxies\nConfiguration: integrator.json or environment variables. See README.\n")
 	})
-	server := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Zoraxy-Integrator-Version", "0.1.1")
+		mux.ServeHTTP(w, r)
+	})
+	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -287,7 +293,7 @@ func run() error {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	log.Printf("integrator listening on %s", *listen)
+	log.Printf("integrator 0.1.1 listening on %s", *listen)
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
