@@ -1,38 +1,38 @@
 # Zoraxy CI/CD Integrator
 
-Plugin Go untuk membuat, mengubah upstream, dan menghapus **host-based HTTP reverse proxy** Zoraxy melalui pipeline CI/CD. Memakai kontrak `-introspect` / `-configure` [Zoraxy Plugin API](https://zoraxy.aroz.org/plugins/html/zoraxy_plugin%20API.html) dan API manajemen Zoraxy. Tidak memasang sertifikat, DNS, atau deploy aplikasi secara otomatis.
+A Go plugin for creating, updating upstreams, and deleting Zoraxy **host-based HTTP reverse proxies** from CI/CD pipelines. It implements the `-introspect` / `-configure` contract from the [Zoraxy Plugin API](https://zoraxy.aroz.org/plugins/html/zoraxy_plugin%20API.html) and uses the Zoraxy management API. It does not automatically provision certificates, configure DNS, or deploy applications.
 
-> **Perhatian:** API plugin bearer-token Zoraxy tidak menyediakan pembuatan/penghapusan rule. Plugin ini login ke **API manajemen** memakai akun admin + CSRF untuk operasi tersebut. Simpan kredensial dan token dengan aman; jangan expose endpoint CI/CD ke internet tanpa HTTPS. Zoraxy management port harus privat.
+> **Warning:** Zoraxy's bearer-token plugin API does not support creating or deleting proxy rules. This plugin signs in to the **management API** using administrator credentials and CSRF protection for those operations. Store credentials and tokens securely; never expose the CI/CD endpoint to the internet without HTTPS. Keep the Zoraxy management port private.
 
-## Menjalankan
+## Installation and Configuration
 
-Memerlukan Go 1.22+. Build untuk OS/arsitektur **server Zoraxy** (contoh Linux amd64):
+Requires Go 1.22+. Build for the **Zoraxy server's operating system and architecture** (Linux amd64 in this example):
 
 ```sh
 GOOS=linux GOARCH=amd64 go build -o dist/zoraxy-integrator .
 ```
 
-Buat folder plugin bernama `zoraxy-integrator` di folder plugin Zoraxy, isi executable `zoraxy-integrator` serta file `integrator.json`; berikan izin eksekusi pada binary. Zoraxy menemukan executable yang namanya sama dengan folder dan menjalankannya dengan `-introspect` dan `-configure`. Aktifkan plugin di pengelola plugin Zoraxy. Metadata bisa dicek manual dengan `./dist/zoraxy-integrator -introspect`.
+Create a directory named `zoraxy-integrator` inside Zoraxy's plugin directory. Place the `zoraxy-integrator` executable and `integrator.json` inside it, and grant execute permission to the binary. Zoraxy discovers an executable with the same name as its parent directory and runs it with `-introspect` and `-configure`. Enable the plugin in Zoraxy's plugin manager. To inspect its metadata manually, run `./dist/zoraxy-integrator -introspect`.
 
-Siapkan `integrator.json` dari `integrator.example.json`, ganti semua nilai contoh. `allowed_domains` wajib diisi; hostname harus sama dengan domain atau subdomainnya. Buat token acak **minimal 32 karakter**, misalnya dengan `openssl rand -hex 32`. Restriksi akses file konfigurasi (mis. `chmod 600 integrator.json`), jangan commit secrets. Lingkungan plugin dapat diisi via `ZORAXY_URL`, `ZORAXY_USERNAME`, `ZORAXY_PASSWORD`, `INTEGRATOR_TOKEN`, dan `INTEGRATOR_ALLOWED_DOMAINS` (daftar domain dipisahkan koma). Environment menimpa file. Zoraxy management URL default `http://127.0.0.1:8000` dan harus dapat diakses dari proses plugin; gunakan HTTPS jika melintasi jaringan tidak tepercaya. Akun Zoraxy harus memiliki sesi login yang berfungsi (jangan andalkan mode `-noauth`).
+Create `integrator.json` from `integrator.example.json` and replace all example values. `allowed_domains` is required; a hostname must match a listed domain or one of its subdomains. Generate a random token of **at least 32 characters**, for example with `openssl rand -hex 32`. Restrict access to the configuration file (for example, `chmod 600 integrator.json`) and never commit secrets. You can also configure the plugin using `ZORAXY_URL`, `ZORAXY_USERNAME`, `ZORAXY_PASSWORD`, `INTEGRATOR_TOKEN`, and `INTEGRATOR_ALLOWED_DOMAINS` (a comma-separated list). Environment variables override file settings. The default Zoraxy management URL is `http://127.0.0.1:8000` and must be reachable from the plugin process; use HTTPS when crossing an untrusted network. The Zoraxy account must support session-based login; do not rely on `-noauth` mode.
 
-Untuk pengujian tanpa Zoraxy plugin manager: `go run . -listen 127.0.0.1:9080 -config integrator.json`. Endpoint langsung berjalan di alamat itu. Ketika dipasang sebagai plugin, endpoint yang sama diteruskan melalui **proxy rule yang mengaktifkan plugin** pada prefix `/_zoraxy-integrator/v1/`. Jangan mengaktifkan plugin untuk proxy rule publik yang tidak dipercaya: host allowlist melindungi target yang dimodifikasi, bukan siapa yang dapat mencoba mengakses endpoint. Gunakan host khusus yang dilindungi HTTPS dan kontrol akses (atau panggil listener lokal dari job CI pada mesin yang sama). Jangan bocorkan token dalam log/artifact pipeline. Perhatikan bahwa `UIPath` hanya menampilkan petunjuk; tidak menyimpan secrets.
+To test without the Zoraxy plugin manager, run `go run . -listen 127.0.0.1:9080 -config integrator.json`. The endpoint is then available directly at that address. When installed as a plugin, the same endpoint is forwarded through a **proxy rule with the plugin enabled**, under the `/_zoraxy-integrator/v1/` prefix. Do not enable the plugin on untrusted public proxy rules: the hostname allowlist limits the targets that can be modified, not who can attempt to access the endpoint. Use a dedicated hostname protected by HTTPS and access controls, or call the local listener from a CI job on the same machine. Never leak tokens into pipeline logs or artifacts. `UIPath` only displays instructions; it does not store secrets.
 
-### Mengizinkan semua domain
+### Allowing All Domains
 
-Gunakan wildcard eksplisit dalam `integrator.json`:
+Use an explicit wildcard in `integrator.json`:
 
 ```json
 "allowed_domains": ["*"]
 ```
 
-Atau set environment variable `INTEGRATOR_ALLOWED_DOMAINS='*'`. Restart plugin setelah mengubah konfigurasi. Wildcard ini mengizinkan semua hostname DNS valid, bukan wildcard hostname pada payload. Allowlist kosong tetap ditolak. Bearer token tetap wajib dan perubahan/penghapusan tetap terbatas pada rule bertag `zoraxy-integrator`.
+Alternatively, set `INTEGRATOR_ALLOWED_DOMAINS='*'`. Restart the plugin after changing its configuration. This wildcard allows all valid DNS hostnames; it does not enable wildcard hostnames in deployment payloads. Empty allowlists are still rejected. Bearer authentication remains mandatory, and updates/deletions remain restricted to rules tagged `zoraxy-integrator`.
 
-**Risiko:** pemegang token dapat membuat proxy untuk domain mana pun. Gunakan hanya pada pipeline tepercaya dan lindungi endpoint dengan HTTPS serta pembatasan jaringan. Ini tidak otomatis mengatur DNS atau sertifikat domain.
+**Risk:** anyone holding the token can create proxies for any domain. Use this setting only with trusted pipelines, and protect the endpoint with HTTPS and network restrictions. It does not automatically configure DNS or domain certificates.
 
-## API CI/CD
+## CI/CD API
 
-Semua permintaan memerlukan `Authorization: Bearer <token>`. `PUT` dan `DELETE` memerlukan `Content-Type: application/json` serta body tunggal. Gunakan alamat plugin yang dapat dicapai pipeline:
+All requests require `Authorization: Bearer <token>`. `PUT` and `DELETE` require `Content-Type: application/json` and a single JSON body. Use a plugin address reachable from your pipeline:
 
 ```sh
 curl -fsS -X PUT https://integrator.example.com/_zoraxy-integrator/v1/proxies \
@@ -44,13 +44,36 @@ curl -fsS -X DELETE https://integrator.example.com/_zoraxy-integrator/v1/proxies
   -d '{"hostname":"app.apps.example.com"}'
 ```
 
-`upstream` wajib berbentuk `http://host:port` atau `https://host:port`, tanpa path/query/userinfo. Skema menentukan TLS **ke upstream**; TLS publik/dari klien diatur terpisah dalam Zoraxy. Respons JSON: `{"action":"created|updated|unchanged|deleted","hostname":"...","upstream":"..."}`. `GET /_zoraxy-integrator/v1/health` (tetap perlu token) mengembalikan `{"status":"ok"}`.
+`upstream` must use `http://host:port` or `https://host:port`, without a path, query string, or user information. The scheme determines TLS **to the upstream**; public/client-facing TLS is configured separately in Zoraxy. JSON responses use `{"action":"created|updated|unchanged|deleted","hostname":"...","upstream":"..."}`. `GET /_zoraxy-integrator/v1/health` also requires a token and returns `{"status":"ok"}`.
 
-Plugin membuat rule dengan tag `zoraxy-integrator` dan hanya akan mengubah/menghapus rule yang memiliki tag tersebut. Jika rule host telah ada tetapi bukan milik plugin, permintaan gagal, bukan menimpanya. Untuk perubahan upstream plugin hanya mendukung rule aktif dengan **tepat satu upstream aktif dan tanpa upstream nonaktif**, dan mempertahankan pengaturan rule lainnya. `DELETE` untuk hostname yang belum ada menghasilkan `unchanged`. Operasi dibaca ulang setelah mutasi; kegagalan mengembalikan HTTP 502. Bila 502 terjadi, periksa kondisi rule di Zoraxy sebelum mengulang deploy: API Zoraxy tidak bersifat transaksional. Proses terpisah / job CI bersamaan tidak mendapat penguncian lintas-proses; serialisasikan deploy per hostname.
+The plugin creates rules tagged `zoraxy-integrator` and only updates or deletes rules carrying that tag. If a hostname already exists but is not owned by the plugin, the request fails instead of overwriting it. Upstream changes support enabled rules with **exactly one active upstream and no inactive upstreams**, while preserving other rule settings. Deleting a nonexistent hostname returns `unchanged`. Mutations are followed by read-back verification; failures return HTTP 502. After a 502 response, inspect the rule in Zoraxy before retrying: the Zoraxy API is not transactional. Separate processes or concurrent CI jobs do not share a cross-process lock; serialize deployments for each hostname.
 
-## Contoh GitHub Actions
+### Access Rules and Exploit Prevention (v0.2.0)
 
-Tambahkan step berikut **setelah deployment aplikasi berhasil**. Simpan `INTEGRATOR_URL` (mis. `https://integrator.example.com`) dan `INTEGRATOR_TOKEN` sebagai repository secrets; isi repository variables `APP_HOSTNAME` dan `APP_UPSTREAM`. Runner harus dapat mengakses integrator, dan Zoraxy harus dapat mengakses upstream. Contoh memakai `jq` yang tersedia di runner Ubuntu GitHub-hosted.
+A `PUT` payload can include two additional options:
+
+```json
+{
+  "hostname": "app.example.com",
+  "upstream": "http://10.0.0.5:8080",
+  "access_rule": "default",
+  "exploit_prevention": true
+}
+```
+
+- `access_rule`: the **ID** of an existing Zoraxy access rule, not its display name. Find the ID in the management API response from `/api/access/list` using an administrator session, or inspect access-rule selection requests in your browser's developer tools. The plugin does not create access rules. IDs are checked before proxy mutations; an unknown ID causes the operation to fail.
+- `exploit_prevention`: controls **Block Common Exploits** (SQL injection, XSS, etc.). Set `true` to enable it or `false` to disable it. It does not change existing AI crawler blocking or mitigation actions. New rules use Zoraxy's default mitigation action (`0`, an HTTP 404 response).
+- When creating a rule, omitted options default to `access_rule: "default"` and `exploit_prevention: false`.
+- When updating a rule, omitted options (or `null`) preserve the existing values. Changing only these settings while keeping the same upstream returns `updated`; submitting the same configuration again returns `unchanged`. `upstream` is still required.
+- `DELETE` accepts only a hostname, not these options.
+
+Changing Exploit Prevention on an existing rule requires `/api/proxy/edit`, which can reset settings if parameters are incomplete. The integrator reads the rule details first and preserves other settings, including authentication, tags, rate limits, and security settings. If your Zoraxy version returns unknown or incomplete fields, or CAPTCHA settings that cannot be preserved (such as exception rules), the plugin **rejects the operation before mutation**. This support is based on the Zoraxy source contract at commit `310b0cc343a3c2af6d040a5300f7047d61ec0aeb`; test your version in staging. Upstream, exploit prevention, and access-rule changes use separate requests, not a transaction; inspect the current state if an error occurs after some requests have succeeded.
+
+After upgrading, stop the plugin, replace the binary with the build for your operating system and architecture, and start it again. The UI and version header should show `0.2.0`.
+
+## GitHub Actions Example
+
+Add the following step **after the application deployment succeeds**. Store `INTEGRATOR_URL` (for example, `https://integrator.example.com`) and `INTEGRATOR_TOKEN` as repository secrets, and configure the repository variables `APP_HOSTNAME` and `APP_UPSTREAM`. The runner must be able to reach the integrator, and Zoraxy must be able to reach the upstream. This example uses `jq`, which is available on GitHub-hosted Ubuntu runners.
 
 ```yaml
 concurrency:
@@ -78,13 +101,13 @@ jobs:
             --data-binary @payload.json
 ```
 
-`curl` exit nonzero pada respons 4xx/5xx sehingga job gagal. Jangan menambahkan retry otomatis untuk mutasi tanpa mengecek state setelah error.
+`curl` exits with a nonzero status on 4xx/5xx responses, causing the job to fail. Do not add automatic retries for mutations without checking the current state after an error.
 
-## Validasi
+## Validation
 
 ```sh
 go test -race ./...
 go vet ./...
 ```
 
-Referensi kontrak CRUD Zoraxy yang dipakai: [proxy handler](https://github.com/tobychui/zoraxy/blob/main/src/reverseproxy.go), [upstream handler](https://github.com/tobychui/zoraxy/blob/main/src/upstreams.go). API manajemen Zoraxy tidak dijamin stabil lintas versi; uji di staging sebelum penggunaan produksi.
+Zoraxy CRUD contract references: [proxy handlers](https://github.com/tobychui/zoraxy/blob/main/src/reverseproxy.go) and [upstream handlers](https://github.com/tobychui/zoraxy/blob/main/src/upstreams.go). The Zoraxy management API is not guaranteed to remain stable across versions; test in staging before using it in production.

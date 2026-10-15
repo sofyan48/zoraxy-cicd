@@ -30,7 +30,7 @@ func introspect() map[string]any {
 		"author": "sofyan48", "author_contact": "https://github.com/sofyan48/zoraxy-integrator",
 		"description": "Token-authenticated CI/CD provisioning of managed HTTP proxy rules",
 		"url":         "https://github.com/sofyan48/zoraxy-integrator", "type": 0,
-		"version_major": 0, "version_minor": 1, "version_patch": 1,
+		"version_major": 0, "version_minor": 2, "version_patch": 0,
 		"static_capture_paths":   []map[string]string{{"capture_path": apiPrefix}},
 		"static_capture_ingress": "/capture", "ui_path": "/ui",
 	}
@@ -151,11 +151,15 @@ func (a *application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	d.Hostname = host
 	if r.Method == http.MethodPut {
+		if d.AccessRule != nil && (*d.AccessRule == "" || strings.TrimSpace(*d.AccessRule) != *d.AccessRule) {
+			respond(w, 400, map[string]string{"error": "access_rule must be a non-empty existing rule ID without surrounding whitespace"})
+			return
+		}
 		if err = validateUpstream(d.Upstream); err != nil {
 			respond(w, 400, map[string]string{"error": err.Error()})
 			return
 		}
-	} else if d.Upstream != "" {
+	} else if d.Upstream != "" || d.AccessRule != nil || d.ExploitPrevention != nil {
 		respond(w, 400, map[string]string{"error": "DELETE accepts hostname only"})
 		return
 	}
@@ -278,10 +282,10 @@ func run() error {
 	mux.HandleFunc("/capture/", app.serveCapture)
 	mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = io.WriteString(w, "CI/CD Integrator 0.1.1\nAPI: PUT /_zoraxy-integrator/v1/proxies\nConfiguration: integrator.json or environment variables. See README.\n")
+		_, _ = io.WriteString(w, "CI/CD Integrator 0.2.0\nAPI: PUT /_zoraxy-integrator/v1/proxies\nConfiguration: integrator.json or environment variables. See README.\n")
 	})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Zoraxy-Integrator-Version", "0.1.1")
+		w.Header().Set("X-Zoraxy-Integrator-Version", "0.2.0")
 		mux.ServeHTTP(w, r)
 	})
 	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
@@ -293,7 +297,7 @@ func run() error {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	log.Printf("integrator 0.1.1 listening on %s", *listen)
+	log.Printf("integrator 0.2.0 listening on %s", *listen)
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

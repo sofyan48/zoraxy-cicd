@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,8 +22,10 @@ const ownershipTag = "zoraxy-integrator"
 const maxResponseBody = 1 << 20
 
 type Deployment struct {
-	Hostname string `json:"hostname"`
-	Upstream string `json:"upstream"`
+	Hostname          string  `json:"hostname"`
+	Upstream          string  `json:"upstream"`
+	AccessRule        *string `json:"access_rule,omitempty"`
+	ExploitPrevention *bool   `json:"exploit_prevention,omitempty"`
 }
 
 type Result struct {
@@ -52,6 +55,8 @@ type proxyRule struct {
 	Disabled             bool
 	ActiveOrigins        []proxyOrigin
 	InactiveOrigins      []proxyOrigin
+	AccessFilterUUID     string
+	BlockCommonExploits  bool
 }
 
 // NewZoraxyClient accepts a management origin, without a path or URL credentials.
@@ -91,25 +96,71 @@ func (c *ZoraxyClient) Apply(ctx context.Context, d Deployment) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
+	access, exploit := "default", false
+	if rule != nil {
+		access, exploit = rule.AccessFilterUUID, rule.BlockCommonExploits
+	}
+	if d.AccessRule != nil {
+		access = *d.AccessRule
+	}
+	if d.ExploitPrevention != nil {
+		exploit = *d.ExploitPrevention
+	}
+	if d.AccessRule != nil || rule == nil {
+		if err := c.requireAccessRule(ctx, access); err != nil {
+			return Result{}, err
+		}
+	}
+	var edit url.Values
+	var before map[string]json.RawMessage
+	if rule != nil && exploit != rule.BlockCommonExploits {
+		before, err = c.proxyDetail(ctx, d.Hostname)
+		if err != nil {
+			return Result{}, err
+		}
+		rawDetail, _ := json.Marshal(before)
+		var detailedRule proxyRule
+		if json.Unmarshal(rawDetail, &detailedRule) != nil || !reflect.DeepEqual(*rule, detailedRule) {
+			return Result{}, errors.New("proxy list and detail disagree; refusing mutation")
+		}
+		edit, err = exploitEditForm(before, d.Hostname, exploit)
+		if err != nil {
+			return Result{}, err
+		}
+	}
 	action := "created"
 	if rule != nil {
 		if err := manageable(rule); err != nil {
 			return Result{}, err
 		}
-		if rule.ActiveOrigins[0] == want {
+		if rule.ActiveOrigins[0] == want && access == rule.AccessFilterUUID && exploit == rule.BlockCommonExploits {
 			return Result{Action: "unchanged", Hostname: d.Hostname, Upstream: d.Upstream}, nil
 		}
 		action = "updated"
-		payload, _ := json.Marshal(want)
-		err = c.mutate(ctx, "/api/proxy/upstream/update", url.Values{
-			"ep": {d.Hostname}, "origin": {rule.ActiveOrigins[0].OriginIpOrDomain},
-			"active": {"true"}, "payload": {string(payload)},
-		})
+		if rule.ActiveOrigins[0] != want {
+			payload, _ := json.Marshal(want)
+			err = c.mutate(ctx, "/api/proxy/upstream/update", url.Values{
+				"ep": {d.Hostname}, "origin": {rule.ActiveOrigins[0].OriginIpOrDomain},
+				"active": {"true"}, "payload": {string(payload)},
+			})
+			if err != nil {
+				return Result{}, err
+			}
+		}
+		if edit != nil {
+			if err = c.mutate(ctx, "/api/proxy/edit", edit); err != nil {
+				return Result{}, err
+			}
+		}
+		if access != rule.AccessFilterUUID {
+			err = c.mutate(ctx, "/api/access/attach", url.Values{"host": {d.Hostname}, "id": {access}})
+		}
 	} else {
 		err = c.mutate(ctx, "/api/proxy/add", url.Values{
 			"type": {"host"}, "rootname": {d.Hostname}, "ep": {want.OriginIpOrDomain},
 			"tls": {strconv.FormatBool(want.RequireTLS)}, "tlsval": {"false"},
-			"tags": {ownershipTag}, "access": {"default"},
+			"tags": {ownershipTag}, "access": {access},
+			"blockCommonExploits": {strconv.FormatBool(exploit)},
 		})
 	}
 	if err != nil {
@@ -119,10 +170,203 @@ func (c *ZoraxyClient) Apply(ctx context.Context, d Deployment) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
-	if verified == nil || manageable(verified) != nil || verified.ActiveOrigins[0] != want {
+	if verified == nil || manageable(verified) != nil || verified.ActiveOrigins[0] != want || verified.AccessFilterUUID != access || verified.BlockCommonExploits != exploit {
 		return Result{}, errors.New("proxy mutation read-back verification failed")
 	}
+	if before != nil {
+		after, err := c.proxyDetail(ctx, d.Hostname)
+		if err != nil {
+			return Result{}, err
+		}
+		for key, value := range before {
+			if key == "ActiveOrigins" || key == "AccessFilterUUID" || key == "BlockCommonExploits" {
+				continue
+			}
+			var a, b any
+			if json.Unmarshal(value, &a) != nil || json.Unmarshal(after[key], &b) != nil || !reflect.DeepEqual(a, b) {
+				return Result{}, errors.New("proxy settings preservation read-back verification failed")
+			}
+		}
+	}
 	return Result{Action: action, Hostname: d.Hostname, Upstream: d.Upstream}, nil
+}
+
+func (c *ZoraxyClient) requireAccessRule(ctx context.Context, id string) error {
+	if id == "" || strings.TrimSpace(id) != id {
+		return errors.New("invalid access rule ID")
+	}
+	body, err := c.request(ctx, http.MethodGet, "/api/access/list", nil)
+	if err != nil {
+		return err
+	}
+	if err := checkAPIError(body); err != nil {
+		return err
+	}
+	var rules []struct{ ID string }
+	if json.Unmarshal(body, &rules) != nil || !strings.HasPrefix(strings.TrimSpace(string(body)), "[") {
+		return errors.New("invalid access list response")
+	}
+	found := false
+	seen := map[string]bool{}
+	for _, rule := range rules {
+		if rule.ID == "" || seen[rule.ID] {
+			return errors.New("invalid access list entry")
+		}
+		seen[rule.ID] = true
+		found = found || rule.ID == id
+	}
+	if !found {
+		return errors.New("access rule ID does not exist")
+	}
+	return nil
+}
+
+func (c *ZoraxyClient) proxyDetail(ctx context.Context, hostname string) (map[string]json.RawMessage, error) {
+	body, err := c.request(ctx, http.MethodPost, "/api/proxy/detail", url.Values{"type": {"host"}, "epname": {hostname}})
+	if err != nil {
+		return nil, err
+	}
+	if err := checkAPIError(body); err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	var rule proxyRule
+	if json.Unmarshal(body, &fields) != nil || fields == nil || json.Unmarshal(body, &rule) != nil || !strings.EqualFold(rule.RootOrMatchingDomain, hostname) {
+		return nil, errors.New("invalid proxy detail response")
+	}
+	if err := manageable(&rule); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+// Contract checked against upstream src/reverseproxy.go at
+// 310b0cc343a3c2af6d040a5300f7047d61ec0aeb. Edit copies the endpoint,
+// then overwrites these fields; never infer missing values from Go defaults.
+var editBoolFields = map[string]string{
+	"UseStickySession": "ss", "BypassGlobalTLS": "bpgtls",
+	"EnableConnectSupport": "enableConnectSupport", "EnableUpgradeForwarding": "enableUpgradeForwarding",
+	"DisableUptimeMonitor": "dutm", "DisableAutoFallback": "dAutoFallback",
+	"RequireRateLimit": "rate", "RequireCaptcha": "captcha",
+	"DisableChunkedTransferEncoding": "dChunkedEnc", "ForceHTTP11": "forceHTTP11",
+	"DisableWebSocket": "disableWebSocket", "EnableTimeoutRefreshOnActivity": "enableTimeoutRefreshOnActivity",
+	"DisableLogging": "dLogging", "DisableStatisticCollection": "dStatisticCollection",
+	"BlockCommonExploits": "blockCommonExploits", "BlockAICrawlers": "blockAICrawlers",
+}
+var editIntFields = map[string]string{"RateLimit": "ratenum", "WebsocketTimeout": "websocketTimeout", "MitigationAction": "mitigationAction"}
+
+func exploitEditForm(fields map[string]json.RawMessage, hostname string, enabled bool) (url.Values, error) {
+	fail := errors.New("cannot safely preserve proxy settings for exploit prevention edit")
+	form := url.Values{"rootname": {hostname}}
+	known := map[string]bool{}
+	for _, key := range strings.Fields("ProxyType RootOrMatchingDomain MatchingDomainAlias ActiveOrigins InactiveOrigins UseActiveLoadBalance Disabled ListeningPorts TlsOptions VirtualDirectories HeaderRewriteRules EnableWebsocketCustomHeaders AuthenticationProvider CaptchaConfig AccessFilterUUID DefaultSiteOption DefaultSiteValue Tags UptimeMonitorURI") {
+		known[key] = true
+	}
+	for key, param := range editBoolFields {
+		known[key] = true
+		var value *bool
+		if json.Unmarshal(fields[key], &value) != nil || value == nil {
+			return nil, fail
+		}
+		form.Set(param, strconv.FormatBool(*value))
+	}
+	for key, param := range editIntFields {
+		known[key] = true
+		var value *int64
+		if json.Unmarshal(fields[key], &value) != nil || value == nil || *value < 0 {
+			return nil, fail
+		}
+		form.Set(param, strconv.FormatInt(*value, 10))
+	}
+	for key := range fields {
+		if !known[key] {
+			return nil, fail
+		}
+	}
+	var uri *string
+	var tags []string
+	var auth map[string]json.RawMessage
+	var method *int
+	if json.Unmarshal(fields["UptimeMonitorURI"], &uri) != nil || uri == nil || strings.TrimSpace(*uri) != *uri || json.Unmarshal(fields["Tags"], &tags) != nil || len(tags) == 0 || json.Unmarshal(fields["AuthenticationProvider"], &auth) != nil || json.Unmarshal(auth["AuthMethod"], &method) != nil || method == nil || *method < 0 || *method > 4 {
+		return nil, fail
+	}
+	for _, tag := range tags {
+		if tag == "" || strings.TrimSpace(tag) != tag || strings.Contains(tag, ",") {
+			return nil, fail
+		}
+	}
+	form.Set("tags", strings.Join(tags, ","))
+	form.Set("utmURI", *uri)
+	form.Set("authprovider", strconv.Itoa(*method))
+	// Upstream rebuilds CaptchaConfig and cannot retain exception rules or
+	// dormant configurations. Reject those rather than silently dropping them.
+	raw, ok := fields["CaptchaConfig"]
+	if !ok {
+		return nil, fail
+	}
+	if form.Get("captcha") == "false" {
+		if string(raw) != "null" {
+			return nil, fail
+		}
+	} else {
+		var config map[string]json.RawMessage
+		if json.Unmarshal(raw, &config) != nil || config == nil {
+			return nil, fail
+		}
+		mapping := map[string]string{"Provider": "captchaProvider", "SiteKey": "captchaSiteKey", "SecretKey": "captchaSecretKey", "SessionDuration": "captchaSessionDuration", "RecaptchaVersion": "captchaRecaptchaVersion", "RecaptchaScore": "captchaRecaptchaScore", "ProtectedPathPrefixes": "captchaPathPrefixes", "ExceptionRules": ""}
+		for key := range config {
+			if _, ok := mapping[key]; !ok {
+				return nil, fail
+			}
+		}
+		for key, param := range mapping {
+			value, ok := config[key]
+			if !ok {
+				return nil, fail
+			}
+			switch key {
+			case "ExceptionRules":
+				var rules []json.RawMessage
+				if json.Unmarshal(value, &rules) != nil || string(value) != "null" {
+					return nil, fail
+				}
+			case "ProtectedPathPrefixes":
+				var paths []string
+				if json.Unmarshal(value, &paths) != nil || paths == nil {
+					return nil, fail
+				}
+				for _, path := range paths {
+					if !strings.HasPrefix(path, "/") || strings.TrimSpace(path) != path || strings.ContainsAny(path, ",;\r\n") || (path != "/" && strings.HasSuffix(path, "/")) {
+						return nil, fail
+					}
+				}
+				form.Set(param, strings.Join(paths, "\n"))
+			case "SiteKey", "SecretKey", "RecaptchaVersion":
+				var text *string
+				if json.Unmarshal(value, &text) != nil || text == nil || *text == "" {
+					return nil, fail
+				}
+				form.Set(param, *text)
+			default:
+				var number json.Number
+				if string(value) == "null" || json.Unmarshal(value, &number) != nil {
+					return nil, fail
+				}
+				if key == "RecaptchaScore" {
+					if _, err := strconv.ParseFloat(number.String(), 64); err != nil {
+						return nil, fail
+					}
+				} else {
+					if _, err := strconv.ParseInt(number.String(), 10, 64); err != nil {
+						return nil, fail
+					}
+				}
+				form.Set(param, number.String())
+			}
+		}
+	}
+	form.Set("blockCommonExploits", strconv.FormatBool(enabled))
+	return form, nil
 }
 
 func (c *ZoraxyClient) Delete(ctx context.Context, hostname string) (Result, error) {

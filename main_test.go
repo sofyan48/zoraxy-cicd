@@ -87,6 +87,38 @@ func TestApplication(t *testing.T) {
 	}
 }
 
+func TestSecurityPayload(t *testing.T) {
+	for _, tt := range []struct {
+		method, body string
+		status       int
+	}{
+		{"PUT", `{"hostname":"app.example.com","upstream":"http://backend:8080","access_rule":"private","exploit_prevention":false}`, 201},
+		{"PUT", `{"hostname":"app.example.com","upstream":"http://backend:8080","access_rule":""}`, 400},
+		{"PUT", `{"hostname":"app.example.com","upstream":"http://backend:8080","access_rule":" private "}`, 400},
+		{"PUT", `{"hostname":"app.example.com","upstream":"http://backend:8080","exploit_prevention":"true"}`, 400},
+		{"DELETE", `{"hostname":"app.example.com","access_rule":"private"}`, 400},
+		{"DELETE", `{"hostname":"app.example.com","exploit_prevention":false}`, 400},
+	} {
+		b := &fakeBackend{}
+		a := &application{client: b, domains: []string{"example.com"}, token: sha256.Sum256([]byte("secret"))}
+		r := httptest.NewRequest(tt.method, apiPrefix+"proxies", strings.NewReader(tt.body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		a.ServeHTTP(w, r)
+		if w.Code != tt.status {
+			t.Fatalf("%s: status=%d want=%d", tt.body, w.Code, tt.status)
+		}
+		if tt.status == 201 {
+			if b.last.AccessRule == nil || *b.last.AccessRule != "private" || b.last.ExploitPrevention == nil || *b.last.ExploitPrevention {
+				t.Fatalf("options lost: %+v", b.last)
+			}
+		} else if b.calls != 0 {
+			t.Fatal("invalid request reached backend")
+		}
+	}
+}
+
 func TestWildcardDomains(t *testing.T) {
 	b := &fakeBackend{}
 	a := &application{client: b, domains: []string{"*"}, token: sha256.Sum256([]byte("test-token"))}
