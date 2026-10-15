@@ -180,6 +180,22 @@ func (a *application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	respond(w, status, result)
 }
 
+func (a *application) serveCapture(w http.ResponseWriter, r *http.Request) {
+	capture := strings.TrimSuffix(r.Header.Get("X-Zoraxy-Capture"), "/")
+	if capture != strings.TrimSuffix(apiPrefix, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	original, err := url.ParseRequestURI(r.Header.Get("X-Zoraxy-Uri"))
+	if err != nil || !strings.HasPrefix(original.Path, apiPrefix) {
+		http.NotFound(w, r)
+		return
+	}
+	r.URL.Path = original.Path
+	r.URL.RawQuery = original.RawQuery
+	a.ServeHTTP(w, r)
+}
+
 func run() error {
 	intro := flag.Bool("introspect", false, "print Zoraxy plugin metadata")
 	configure := flag.String("configure", "", "Zoraxy runtime JSON")
@@ -257,20 +273,7 @@ func run() error {
 	app := &application{client: client, token: sha256.Sum256([]byte(cfg.Token)), domains: cfg.Domains}
 	mux := http.NewServeMux()
 	mux.Handle(apiPrefix, app)
-	mux.HandleFunc("/capture/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Zoraxy-Capture") != apiPrefix {
-			http.NotFound(w, r)
-			return
-		}
-		original, err := url.ParseRequestURI(r.Header.Get("X-Zoraxy-Uri"))
-		if err != nil || !strings.HasPrefix(original.Path, apiPrefix) {
-			http.NotFound(w, r)
-			return
-		}
-		r.URL.Path = original.Path
-		r.URL.RawQuery = original.RawQuery
-		app.ServeHTTP(w, r)
-	})
+	mux.HandleFunc("/capture/", app.serveCapture)
 	mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "CI/CD Integrator 0.1.0\nAPI: PUT /_zoraxy-integrator/v1/proxies\nConfiguration: integrator.json or environment variables. See README.\n")

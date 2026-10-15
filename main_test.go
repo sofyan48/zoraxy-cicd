@@ -24,6 +24,35 @@ func (b *fakeBackend) Delete(_ context.Context, s string) (Result, error) {
 	return Result{Action: "deleted", Hostname: s}, nil
 }
 
+func TestCaptureForwarding(t *testing.T) {
+	for _, tt := range []struct {
+		name, capture, uri, token string
+		status                    int
+	}{
+		{"zoraxy trimmed prefix", strings.TrimSuffix(apiPrefix, "/"), apiPrefix + "health", "secret", 200},
+		{"trailing slash prefix", apiPrefix, apiPrefix + "health?check=1", "secret", 200},
+		{"missing token", strings.TrimSuffix(apiPrefix, "/"), apiPrefix + "health", "", 401},
+		{"wrong capture", "/other", apiPrefix + "health", "secret", 404},
+		{"missing capture", "", apiPrefix + "health", "secret", 404},
+		{"outside namespace", strings.TrimSuffix(apiPrefix, "/"), "/api/proxy/add", "secret", 404},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &application{token: sha256.Sum256([]byte("secret"))}
+			req := httptest.NewRequest("GET", "/capture/health", nil)
+			req.Header.Set("X-Zoraxy-Capture", tt.capture)
+			req.Header.Set("X-Zoraxy-Uri", tt.uri)
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			rec := httptest.NewRecorder()
+			a.serveCapture(rec, req)
+			if rec.Code != tt.status {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tt.status, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestApplication(t *testing.T) {
 	b := &fakeBackend{}
 	a := &application{client: b, domains: []string{"example.com"}}
