@@ -18,6 +18,18 @@ Siapkan `integrator.json` dari `integrator.example.json`, ganti semua nilai cont
 
 Untuk pengujian tanpa Zoraxy plugin manager: `go run . -listen 127.0.0.1:9080 -config integrator.json`. Endpoint langsung berjalan di alamat itu. Ketika dipasang sebagai plugin, endpoint yang sama diteruskan melalui **proxy rule yang mengaktifkan plugin** pada prefix `/_zoraxy-integrator/v1/`. Jangan mengaktifkan plugin untuk proxy rule publik yang tidak dipercaya: host allowlist melindungi target yang dimodifikasi, bukan siapa yang dapat mencoba mengakses endpoint. Gunakan host khusus yang dilindungi HTTPS dan kontrol akses (atau panggil listener lokal dari job CI pada mesin yang sama). Jangan bocorkan token dalam log/artifact pipeline. Perhatikan bahwa `UIPath` hanya menampilkan petunjuk; tidak menyimpan secrets.
 
+### Mengizinkan semua domain
+
+Gunakan wildcard eksplisit dalam `integrator.json`:
+
+```json
+"allowed_domains": ["*"]
+```
+
+Atau set environment variable `INTEGRATOR_ALLOWED_DOMAINS='*'`. Restart plugin setelah mengubah konfigurasi. Wildcard ini mengizinkan semua hostname DNS valid, bukan wildcard hostname pada payload. Allowlist kosong tetap ditolak. Bearer token tetap wajib dan perubahan/penghapusan tetap terbatas pada rule bertag `zoraxy-integrator`.
+
+**Risiko:** pemegang token dapat membuat proxy untuk domain mana pun. Gunakan hanya pada pipeline tepercaya dan lindungi endpoint dengan HTTPS serta pembatasan jaringan. Ini tidak otomatis mengatur DNS atau sertifikat domain.
+
 ## API CI/CD
 
 Semua permintaan memerlukan `Authorization: Bearer <token>`. `PUT` dan `DELETE` memerlukan `Content-Type: application/json` serta body tunggal. Gunakan alamat plugin yang dapat dicapai pipeline:

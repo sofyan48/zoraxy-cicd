@@ -58,6 +58,38 @@ func TestApplication(t *testing.T) {
 	}
 }
 
+func TestWildcardDomains(t *testing.T) {
+	b := &fakeBackend{}
+	a := &application{client: b, domains: []string{"*"}, token: sha256.Sum256([]byte("test-token"))}
+	for _, tt := range []struct {
+		host, token string
+		status      int
+	}{
+		{"app.example.com", "test-token", 201},
+		{"other.example.org", "test-token", 201},
+		{"*.example.com", "test-token", 400},
+		{"127.0.0.1", "test-token", 400},
+		{"app.example.net", "wrong-token", 401},
+	} {
+		t.Run(tt.host+tt.token, func(t *testing.T) {
+			req := httptest.NewRequest("PUT", apiPrefix+"proxies", strings.NewReader(`{"hostname":"`+tt.host+`","upstream":"http://backend:8080"}`))
+			req.Header.Set("Authorization", "Bearer "+tt.token)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			a.ServeHTTP(rec, req)
+			if rec.Code != tt.status {
+				t.Fatalf("status=%d, want %d", rec.Code, tt.status)
+			}
+		})
+	}
+	if b.calls != 2 {
+		t.Fatalf("backend calls=%d, want 2", b.calls)
+	}
+	if (&application{}).allowed("app.example.com") {
+		t.Fatal("empty allowlist must deny access")
+	}
+}
+
 func TestIntrospect(t *testing.T) {
 	b, err := json.Marshal(introspect())
 	if err != nil {

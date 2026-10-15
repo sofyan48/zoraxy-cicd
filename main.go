@@ -67,7 +67,7 @@ func normalizeHostname(value string) (string, error) {
 
 func (a *application) allowed(host string) bool {
 	for _, domain := range a.domains {
-		if host == domain || strings.HasSuffix(host, "."+domain) {
+		if domain == "*" || host == domain || strings.HasSuffix(host, "."+domain) {
 			return true
 		}
 	}
@@ -228,6 +228,10 @@ func run() error {
 		return errors.New("allowed_domains must not be empty")
 	}
 	for i, d := range cfg.Domains {
+		if strings.TrimSpace(d) == "*" {
+			cfg.Domains[i] = "*"
+			continue
+		}
 		host, err := normalizeHostname(d)
 		if err != nil {
 			return fmt.Errorf("invalid allowed domain: %w", err)
