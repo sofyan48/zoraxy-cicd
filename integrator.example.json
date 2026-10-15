@@ -1,0 +1,7 @@
+{
+  "zoraxy_url": "http://127.0.0.1:8000",
+  "zoraxy_username": "admin",
+  "zoraxy_password": "REPLACE_WITH_ADMIN_PASSWORD",
+  "token": "REPLACE_WITH_RANDOM_TOKEN_MINIMUM_32_CHARACTERS",
+  "allowed_domains": ["apps.example.com"]
+}

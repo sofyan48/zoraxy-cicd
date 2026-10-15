@@ -1,0 +1,5 @@
+/integrator.json
+/dist/
+/zoraxy-integrator
+*.test
+coverage.out
